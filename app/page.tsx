@@ -1,9 +1,9 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import SignOutButton from "./sign-out-button";
 
 const upcoming = [
-  { label: "Mapa a místa", note: "voda · tábořiště · ferraty", eta: "v0.2" },
   { label: "Wishlisty", note: "vlastní seznamy míst", eta: "v0.3" },
   { label: "Trasy a Waze", note: "plánování + navigace po úsecích", eta: "v0.4" },
 ];
@@ -30,6 +30,21 @@ export default async function Home() {
           </div>
           <SignOutButton />
         </header>
+
+        <section className="mb-3">
+          <Link
+            href="/map"
+            className="flex items-center justify-between rounded-xl border border-line bg-moss/10 px-5 py-4 transition hover:bg-moss/20"
+          >
+            <div>
+              <p className="font-medium text-ink">Mapa a místa</p>
+              <p className="text-sm text-ink/50">voda · tábořiště · ferraty</p>
+            </div>
+            <span className="rounded-full bg-moss px-3 py-1 font-mono text-xs text-paper">
+              otevřít →
+            </span>
+          </Link>
+        </section>
 
         <section className="space-y-3">
           {upcoming.map((item) => (
