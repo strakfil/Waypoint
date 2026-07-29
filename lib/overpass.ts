@@ -5,9 +5,17 @@ export interface OsmWaterPoint {
   name: string;
 }
 
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://lz4.overpass-api.de/api/interpreter",
+];
+
 /**
  * Queries the OpenStreetMap Overpass API for drinking water points
  * (amenity=drinking_water) inside the given bounding box.
+ * Tries a few public mirrors in turn, since any single one may
+ * rate-limit or block a given origin.
  */
 export async function fetchDrinkingWater(bbox: {
   south: number;
@@ -21,21 +29,35 @@ export async function fetchDrinkingWater(bbox: {
     out body;
   `;
 
-  const response = await fetch("https://overpass-api.de/api/interpreter", {
-    method: "POST",
-    body: query,
-  });
+  let lastError: unknown = null;
 
-  if (!response.ok) {
-    throw new Error(`Overpass API selhalo (${response.status})`);
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        body: query,
+      });
+
+      if (!response.ok) {
+        lastError = new Error(`Overpass API selhalo (${response.status}) na ${endpoint}`);
+        continue;
+      }
+
+      const data = await response.json();
+
+      return (data.elements ?? []).map(
+        (el: { id: number; lat: number; lon: number; tags?: Record<string, string> }) => ({
+          osmId: `osm:node:${el.id}`,
+          lat: el.lat,
+          lng: el.lon,
+          name: el.tags?.name || "Pitná voda",
+        })
+      );
+    } catch (err) {
+      lastError = err;
+      // try the next mirror
+    }
   }
 
-  const data = await response.json();
-
-  return (data.elements ?? []).map((el: { id: number; lat: number; lon: number; tags?: Record<string, string> }) => ({
-    osmId: `osm:node:${el.id}`,
-    lat: el.lat,
-    lng: el.lon,
-    name: el.tags?.name || "Pitná voda",
-  }));
+  throw lastError ?? new Error("Všechna Overpass zrcadla selhala.");
 }

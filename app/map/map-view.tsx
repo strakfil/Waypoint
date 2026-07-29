@@ -9,6 +9,7 @@ import { PLACE_TYPE_META, type Place, type PlaceType } from "@/lib/places";
 
 const BRNO = { lat: 49.1951, lng: 16.6068 };
 const MIN_AUTO_FETCH_ZOOM = 13;
+const MIN_MS_BETWEEN_FETCHES = 8000;
 
 export default function MapView() {
   const mapContainer = useRef<HTMLDivElement>(null);
@@ -16,7 +17,11 @@ export default function MapView() {
   const markersRef = useRef<Map<string, Marker>>(new Map());
   const placesRef = useRef<Place[]>([]);
   const lastFetchBoundsRef = useRef<maplibregl.LngLatBounds | null>(null);
+  const lastFetchTimeRef = useRef<number>(0);
   const fetchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const userMarkerRef = useRef<Marker | null>(null);
+  const geoWatchIdRef = useRef<number | null>(null);
+  const userPositionRef = useRef<{ lat: number; lng: number } | null>(null);
 
   const [places, setPlaces] = useState<Place[]>([]);
   const [zoom, setZoom] = useState(12);
@@ -46,14 +51,6 @@ export default function MapView() {
   // Initialize the map once.
   useEffect(() => {
     if (!mapContainer.current || mapRef.current) return;
-
-    navigator.geolocation?.getCurrentPosition(
-      (pos) => mapRef.current?.setCenter([pos.coords.longitude, pos.coords.latitude]),
-      () => {
-        /* fall back silently to Brno */
-      },
-      { timeout: 4000 }
-    );
 
     const map = new maplibregl.Map({
       container: mapContainer.current,
@@ -87,6 +84,42 @@ export default function MapView() {
       setDraftNote("");
     });
 
+    // Track the user's live position with a "you are here" marker, and
+    // recenter the map on it once as soon as we get the first fix.
+    let hasCenteredOnUser = false;
+    if (navigator.geolocation) {
+      geoWatchIdRef.current = navigator.geolocation.watchPosition(
+        (pos) => {
+          const point = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+          userPositionRef.current = point;
+
+          if (!userMarkerRef.current) {
+            const el = document.createElement("div");
+            el.style.width = "18px";
+            el.style.height = "18px";
+            el.style.borderRadius = "50%";
+            el.style.background = "#4C7A8C";
+            el.style.border = "3px solid white";
+            el.style.boxShadow = "0 0 0 4px rgba(76,122,140,0.25), 0 1px 4px rgba(0,0,0,0.4)";
+            userMarkerRef.current = new maplibregl.Marker({ element: el })
+              .setLngLat([point.lng, point.lat])
+              .addTo(map);
+          } else {
+            userMarkerRef.current.setLngLat([point.lng, point.lat]);
+          }
+
+          if (!hasCenteredOnUser) {
+            hasCenteredOnUser = true;
+            map.setCenter([point.lng, point.lat]);
+          }
+        },
+        () => {
+          /* fall back silently to Brno if permission is denied */
+        },
+        { enableHighAccuracy: true, maximumAge: 10000, timeout: 8000 }
+      );
+    }
+
     const maybeAutoFetchWater = () => {
       setZoom(map.getZoom());
       if (map.getZoom() < MIN_AUTO_FETCH_ZOOM) return;
@@ -112,6 +145,9 @@ export default function MapView() {
 
     return () => {
       if (fetchTimeoutRef.current) clearTimeout(fetchTimeoutRef.current);
+      if (geoWatchIdRef.current !== null) {
+        navigator.geolocation?.clearWatch(geoWatchIdRef.current);
+      }
       map.remove();
       mapRef.current = null;
     };
@@ -198,6 +234,13 @@ export default function MapView() {
     async (silent: boolean) => {
       const map = mapRef.current;
       if (!map) return;
+
+      const now = Date.now();
+      if (silent && now - lastFetchTimeRef.current < MIN_MS_BETWEEN_FETCHES) {
+        // Too soon since the last automatic fetch — skip quietly.
+        return;
+      }
+
       setImporting(true);
       if (!silent) setImportMessage(null);
 
@@ -228,6 +271,7 @@ export default function MapView() {
         }
 
         lastFetchBoundsRef.current = bounds;
+        lastFetchTimeRef.current = now;
 
         if (newPoints.length > 0) {
           await loadPlaces();
@@ -241,7 +285,11 @@ export default function MapView() {
           );
         }
       } catch {
-        if (!silent) setImportMessage("Import se nepovedl, zkus to prosím znovu.");
+        if (!silent) {
+          setImportMessage(
+            "Zdroj OpenStreetMap dat je teď nedostupný nebo přetížený. Zkus to prosím za chvíli."
+          );
+        }
       } finally {
         setImporting(false);
       }
@@ -256,9 +304,25 @@ export default function MapView() {
     runWaterImportRef.current = runWaterImport;
   }, [runWaterImport]);
 
+  function flyToUser() {
+    const map = mapRef.current;
+    const pos = userPositionRef.current;
+    if (!map || !pos) return;
+    map.flyTo({ center: [pos.lng, pos.lat], zoom: Math.max(map.getZoom(), 14) });
+  }
+
   return (
     <div className="relative h-full w-full">
       <div ref={mapContainer} className="h-full w-full" />
+
+      <button
+        onClick={flyToUser}
+        title="Moje poloha"
+        className="absolute right-5 top-[88px] flex h-9 w-9 items-center justify-center rounded-lg border border-line bg-white shadow-sm transition hover:bg-paper"
+      >
+        <span className="block h-2.5 w-2.5 rounded-full border-2 border-white bg-sky shadow-[0_0_0_2px_rgba(76,122,140,0.4)]" />
+      </button>
+
 
       {/* Legend */}
       <div className="pointer-events-none absolute bottom-5 left-5 rounded-lg border border-line bg-white/90 px-3 py-2 text-xs shadow-sm backdrop-blur">
