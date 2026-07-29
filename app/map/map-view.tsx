@@ -8,13 +8,18 @@ import { fetchDrinkingWater } from "@/lib/overpass";
 import { PLACE_TYPE_META, type Place, type PlaceType } from "@/lib/places";
 
 const BRNO = { lat: 49.1951, lng: 16.6068 };
+const MIN_AUTO_FETCH_ZOOM = 13;
 
 export default function MapView() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const markersRef = useRef<Map<string, Marker>>(new Map());
+  const placesRef = useRef<Place[]>([]);
+  const lastFetchBoundsRef = useRef<maplibregl.LngLatBounds | null>(null);
+  const fetchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [places, setPlaces] = useState<Place[]>([]);
+  const [zoom, setZoom] = useState(12);
   const [selectedPlace, setSelectedPlace] = useState<Place | null>(null);
   const [draft, setDraft] = useState<{ lat: number; lng: number } | null>(null);
   const [draftType, setDraftType] = useState<PlaceType>("custom");
@@ -34,6 +39,7 @@ export default function MapView() {
 
     if (!error && data) {
       setPlaces(data as Place[]);
+      placesRef.current = data as Place[];
     }
   }, [supabase]);
 
@@ -62,8 +68,7 @@ export default function MapView() {
               "https://c.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png",
             ],
             tileSize: 256,
-            attribution:
-              "© OpenStreetMap contributors © CARTO",
+            attribution: "© OpenStreetMap contributors © CARTO",
           },
         },
         layers: [{ id: "osm", type: "raster", source: "osm" }],
@@ -82,10 +87,31 @@ export default function MapView() {
       setDraftNote("");
     });
 
+    const maybeAutoFetchWater = () => {
+      setZoom(map.getZoom());
+      if (map.getZoom() < MIN_AUTO_FETCH_ZOOM) return;
+
+      const bounds = map.getBounds();
+      const last = lastFetchBoundsRef.current;
+      // Skip if the current view is already fully covered by the last fetch.
+      if (last && last.contains(bounds.getNorthWest()) && last.contains(bounds.getSouthEast())) {
+        return;
+      }
+
+      if (fetchTimeoutRef.current) clearTimeout(fetchTimeoutRef.current);
+      fetchTimeoutRef.current = setTimeout(() => {
+        runWaterImportRef.current(true);
+      }, 800);
+    };
+
+    map.on("moveend", maybeAutoFetchWater);
+    map.on("load", maybeAutoFetchWater);
+
     mapRef.current = map;
     loadPlaces();
 
     return () => {
+      if (fetchTimeoutRef.current) clearTimeout(fetchTimeoutRef.current);
       map.remove();
       mapRef.current = null;
     };
@@ -168,48 +194,67 @@ export default function MapView() {
     }
   }
 
-  async function importWater() {
-    const map = mapRef.current;
-    if (!map) return;
-    setImporting(true);
-    setImportMessage(null);
+  const runWaterImport = useCallback(
+    async (silent: boolean) => {
+      const map = mapRef.current;
+      if (!map) return;
+      setImporting(true);
+      if (!silent) setImportMessage(null);
 
-    try {
-      const bounds = map.getBounds();
-      const points = await fetchDrinkingWater({
-        south: bounds.getSouth(),
-        west: bounds.getWest(),
-        north: bounds.getNorth(),
-        east: bounds.getEast(),
-      });
-
-      const existingOsmIds = new Set(places.map((p) => p.osm_id).filter(Boolean));
-      const newPoints = points.filter((p) => !existingOsmIds.has(p.osmId));
-
-      for (const point of newPoints) {
-        await supabase.rpc("insert_place", {
-          p_type: "water",
-          p_name: point.name,
-          p_description: null,
-          p_lat: point.lat,
-          p_lng: point.lng,
-          p_source: "osm",
-          p_osm_id: point.osmId,
+      try {
+        const bounds = map.getBounds();
+        const points = await fetchDrinkingWater({
+          south: bounds.getSouth(),
+          west: bounds.getWest(),
+          north: bounds.getNorth(),
+          east: bounds.getEast(),
         });
-      }
 
-      setImportMessage(
-        newPoints.length > 0
-          ? `Přidáno ${newPoints.length} nových zdrojů vody.`
-          : "V tomto výřezu už nic nového není."
-      );
-      await loadPlaces();
-    } catch {
-      setImportMessage("Import se nepovedl, zkus to prosím znovu.");
-    } finally {
-      setImporting(false);
-    }
-  }
+        const existingOsmIds = new Set(
+          placesRef.current.map((p) => p.osm_id).filter(Boolean)
+        );
+        const newPoints = points.filter((p) => !existingOsmIds.has(p.osmId));
+
+        for (const point of newPoints) {
+          await supabase.rpc("insert_place", {
+            p_type: "water",
+            p_name: point.name,
+            p_description: null,
+            p_lat: point.lat,
+            p_lng: point.lng,
+            p_source: "osm",
+            p_osm_id: point.osmId,
+          });
+        }
+
+        lastFetchBoundsRef.current = bounds;
+
+        if (newPoints.length > 0) {
+          await loadPlaces();
+        }
+
+        if (!silent) {
+          setImportMessage(
+            newPoints.length > 0
+              ? `Přidáno ${newPoints.length} nových zdrojů vody.`
+              : "V tomto výřezu už nic nového není."
+          );
+        }
+      } catch {
+        if (!silent) setImportMessage("Import se nepovedl, zkus to prosím znovu.");
+      } finally {
+        setImporting(false);
+      }
+    },
+    [loadPlaces, supabase]
+  );
+
+  // Keep a ref to the latest import function so the map's event listeners
+  // (registered once, on mount) always call the current version.
+  const runWaterImportRef = useRef(runWaterImport);
+  useEffect(() => {
+    runWaterImportRef.current = runWaterImport;
+  }, [runWaterImport]);
 
   return (
     <div className="relative h-full w-full">
@@ -235,12 +280,17 @@ export default function MapView() {
             {importMessage}
           </p>
         )}
+        {zoom < MIN_AUTO_FETCH_ZOOM && (
+          <p className="max-w-[220px] rounded-lg border border-line bg-white/90 px-3 py-1.5 text-right text-xs text-ink/50 shadow-sm">
+            Přibliž mapu pro automatické načtení vody v okolí.
+          </p>
+        )}
         <button
-          onClick={importWater}
+          onClick={() => runWaterImport(false)}
           disabled={importing}
           className="rounded-lg bg-sky px-4 py-2 text-sm font-medium text-paper shadow-sm transition hover:bg-sky/90 disabled:opacity-60"
         >
-          {importing ? "Hledám vodu…" : "Najít pitnou vodu v okolí"}
+          {importing ? "Hledám vodu…" : "Obnovit vodu v okolí"}
         </button>
       </div>
 
