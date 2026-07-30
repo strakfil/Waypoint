@@ -6,6 +6,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { createClient } from "@/lib/supabase/client";
 import { fetchDrinkingWater } from "@/lib/overpass";
 import { PLACE_TYPE_META, type Place, type PlaceType } from "@/lib/places";
+import type { ListSummary } from "@/lib/lists";
 
 const BRNO = { lat: 49.1951, lng: 16.6068 };
 const MIN_AUTO_FETCH_ZOOM = 13;
@@ -33,8 +34,57 @@ export default function MapView() {
   const [saving, setSaving] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importMessage, setImportMessage] = useState<string | null>(null);
+  const [userLists, setUserLists] = useState<ListSummary[]>([]);
+  const [addToListMessage, setAddToListMessage] = useState<string | null>(null);
+  const [newListName, setNewListName] = useState("");
+  const [addingToList, setAddingToList] = useState(false);
 
   const supabase = createClient();
+
+  const loadLists = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("lists_with_counts")
+      .select("*")
+      .order("created_at", { ascending: false });
+    if (!error && data) {
+      setUserLists(data as ListSummary[]);
+    }
+  }, [supabase]);
+
+  async function addPlaceToList(listId: string) {
+    if (!selectedPlace) return;
+    setAddingToList(true);
+    const { error } = await supabase
+      .from("list_items")
+      .upsert({ list_id: listId, place_id: selectedPlace.id }, { onConflict: "list_id,place_id" });
+    setAddingToList(false);
+    setAddToListMessage(error ? "Nepovedlo se přidat." : "Přidáno do seznamu.");
+  }
+
+  async function createListAndAdd() {
+    if (!newListName.trim() || !selectedPlace) return;
+    setAddingToList(true);
+
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (user) {
+      const { data: newList, error } = await supabase
+        .from("lists")
+        .insert({ owner_id: user.id, name: newListName.trim() })
+        .select()
+        .single();
+
+      if (!error && newList) {
+        await supabase.from("list_items").insert({ list_id: newList.id, place_id: selectedPlace.id });
+        setNewListName("");
+        await loadLists();
+        setAddToListMessage(`Přidáno do "${newList.name}".`);
+      }
+    }
+    setAddingToList(false);
+  }
 
   const loadPlaces = useCallback(async () => {
     const { data, error } = await supabase
@@ -195,6 +245,14 @@ export default function MapView() {
       }
     }
   }, [places]);
+
+  useEffect(() => {
+    if (selectedPlace) {
+      setAddToListMessage(null);
+      setNewListName("");
+      loadLists();
+    }
+  }, [selectedPlace, loadLists]);
 
   async function savePlace() {
     if (!draft || !draftName.trim()) return;
@@ -443,6 +501,40 @@ export default function MapView() {
                 {n <= (selectedPlace.avg_rating ?? 0) ? "★" : "☆"}
               </button>
             ))}
+          </div>
+
+          <div className="mt-4 border-t border-line pt-3">
+            <p className="mb-2 text-xs text-ink/60">Přidat do seznamu</p>
+            <div className="flex flex-wrap gap-1.5">
+              {userLists.map((list) => (
+                <button
+                  key={list.id}
+                  onClick={() => addPlaceToList(list.id)}
+                  disabled={addingToList}
+                  className="rounded-full border border-line bg-white px-2.5 py-1 text-xs text-ink/70 transition hover:border-moss hover:text-moss disabled:opacity-60"
+                >
+                  {list.name}
+                </button>
+              ))}
+            </div>
+            <div className="mt-2 flex gap-1.5">
+              <input
+                value={newListName}
+                onChange={(e) => setNewListName(e.target.value)}
+                placeholder="nový seznam…"
+                className="flex-1 rounded-lg border border-line bg-white px-2 py-1.5 text-xs"
+              />
+              <button
+                onClick={createListAndAdd}
+                disabled={addingToList || !newListName.trim()}
+                className="rounded-lg bg-moss px-2.5 py-1.5 text-xs font-medium text-paper transition hover:bg-moss-light disabled:opacity-60"
+              >
+                +
+              </button>
+            </div>
+            {addToListMessage && (
+              <p className="mt-2 text-xs text-moss">{addToListMessage}</p>
+            )}
           </div>
         </div>
       )}
